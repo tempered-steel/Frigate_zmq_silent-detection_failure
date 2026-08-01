@@ -228,7 +228,8 @@ those server-side fixes are unrelated to this client-side defect.
 Anything that makes the peer unreachable — or merely slow to answer —
 during the (re-)handshake window: host reboots, container restarts, link
 flaps, switch reboots, VLAN hiccups, or a peer host too busy to reply
-within the plugin's 200 ms timeout. No longer hypothetical: our second
+within the plugin's request timeout (`request_timeout_ms`, default
+200 ms; ours is set to 500 ms). No longer hypothetical: our second
 incident ([`EVIDENCE-INCIDENT-2.md`](EVIDENCE-INCIDENT-2.md)) armed the
 wedge with **no reboot of anything** — a live mid-operation re-init hit
 EAGAIN against a server that was up and listening the whole time. A power
