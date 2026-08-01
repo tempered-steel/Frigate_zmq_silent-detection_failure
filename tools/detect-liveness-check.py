@@ -11,7 +11,9 @@ errors, no restarts, and no log lines for 15 hours. A monitor that lives
 inside the monitored system inherits its blind spots. This script is the
 generic version of the check that now guards our production plant; in a
 backtest against the real incident it fires at the first run after the
-wedge (~30 minutes in, vs. the 14+ hours a human took).
+wedge (~30 minutes in, vs. the 14+ hours a human took). Validated in live
+use during a second, independent occurrence of the wedge (2026-07-27, see
+EVIDENCE-INCIDENT-2.md): both signals returned CRIT.
 
 TWO SIGNALS:
 

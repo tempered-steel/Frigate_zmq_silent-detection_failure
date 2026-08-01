@@ -1,6 +1,9 @@
 # Evidence bank — Frigate `zmq` detector false-ready after remote peer power loss
 
 **Status:** raw evidence file (internal staging; basis for the public dossier).
+**See also:** [`EVIDENCE-INCIDENT-2.md`](EVIDENCE-INCIDENT-2.md) — a second,
+independent occurrence (2026-07-27, EAGAIN on a live re-init, no reboot
+involved) reaching the identical wedge state.
 **Captured:** 2026-07-25, live during incident response, by the on-host agent.
 **Why this file exists:** the originating Frigate log lines rotated out of the
 Docker json-file buffer (10MB × 3 cap) within hours — partly *because of* this

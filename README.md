@@ -5,17 +5,32 @@ plugin (`frigate/detectors/plugins/zmq_ipc.py`) declared its model ready
 **87 seconds before the remote detector process existed**, then silently
 returned zero detections for 15.3 hours — with every health signal green.
 
-**Incident:** 2026-07-25 · **Frigate:** `0.17.2-3d4dd3a` (defect verified
-present on `dev` too) · **Detector:** `type: zmq` over `tcp://` to a network
-host (NVIDIA DGX Spark, GB10) · **Trigger:** storm power interruption at the
-detector host · **Keywords:** Frigate zmq detector, silent zero detections,
+**Incidents:** #1 2026-07-25 (power loss at the peer, 15.3 h) · #2
+2026-07-27 (EAGAIN on a live re-init, no reboot involved, ~4.5 h) ·
+**Frigate:** `0.17.2-3d4dd3a` (defect verified present on `dev` too) ·
+**Detector:** `type: zmq` over `tcp://` to a network
+host (NVIDIA DGX Spark, GB10) · **Keywords:** Frigate zmq detector, silent
+zero detections,
 Model not ready returning zero detections, false model ready, detect_fps 0,
-network detector, REQ/REP, NVR silent failure, detection watchdog ·
+network detector, REQ/REP, EAGAIN, NVR silent failure, detection watchdog ·
 **Companion repo:** [frigate-dgx-spark](https://github.com/tempered-steel/frigate-dgx-spark)
-(the integration this bit) · **Full artifacts:** [`EVIDENCE.md`](EVIDENCE.md) ·
+(the integration this bit) · **Full artifacts:** [`EVIDENCE.md`](EVIDENCE.md)
+(#1) · [`EVIDENCE-INCIDENT-2.md`](EVIDENCE-INCIDENT-2.md) (#2) ·
 **[Are you affected? ↓](#are-you-affected-the-60-second-check)**
 
 ---
+
+> **Update 2026-07-28 — second, independent occurrence.** Two days after
+> the incident below, the same plant entered the identical wedge state
+> through a **different trigger**: a mid-operation model re-init failed
+> with EAGAIN (`Resource temporarily unavailable`) and the plugin went
+> silent — no power event, no server reboot, no Frigate restart preceding
+> it; the detector server process was up 2d23h across the whole incident.
+> Zero detections for ~4.5 h with the same junk inference_speed signature
+> (0.35 ms), same green health signals, same Frigate-only-restart remedy.
+> The wedge does not need a reboot or a vanished peer to arm — any failed
+> (re)init lands in the same unrecoverable state. Full artifacts:
+> [`EVIDENCE-INCIDENT-2.md`](EVIDENCE-INCIDENT-2.md).
 
 ## The short version
 
@@ -210,10 +225,14 @@ later. Separately, that project's issue #27 (explicit-mode
 those server-side fixes are unrelated to this client-side defect.
 
 **What can trigger it besides a power loss?**
-Anything that makes the peer unreachable during the (re-)handshake
-window and lets traffic resume afterward: host reboots, container
-restarts, link flaps, switch reboots, VLAN hiccups. A power event is
-just the version with the best forensic timestamps.
+Anything that makes the peer unreachable — or merely slow to answer —
+during the (re-)handshake window: host reboots, container restarts, link
+flaps, switch reboots, VLAN hiccups, or a peer host too busy to reply
+within the plugin's 200 ms timeout. No longer hypothetical: our second
+incident ([`EVIDENCE-INCIDENT-2.md`](EVIDENCE-INCIDENT-2.md)) armed the
+wedge with **no reboot of anything** — a live mid-operation re-init hit
+EAGAIN against a server that was up and listening the whole time. A power
+event is just the version with the best forensic timestamps.
 
 **How do I know it happened to me historically?**
 Frigate logs to stdout — search it with
@@ -244,7 +263,8 @@ hours under default Docker json-file caps).
 
 | Path | What |
 |---|---|
-| [`EVIDENCE.md`](EVIDENCE.md) | The complete evidence bank: timeline, verbatim log captures (preserved before rotation destroyed them), host/container state, stats, probe ledger, recovery record, proven-vs-hypothesized ledger |
+| [`EVIDENCE.md`](EVIDENCE.md) | Incident 1 (2026-07-25) evidence bank: timeline, verbatim log captures (preserved before rotation destroyed them), host/container state, stats, probe ledger, recovery record, proven-vs-hypothesized ledger |
+| [`EVIDENCE-INCIDENT-2.md`](EVIDENCE-INCIDENT-2.md) | Incident 2 (2026-07-27) evidence bank: same wedge via EAGAIN on a live re-init — no reboot involved; timeline, failure-state captures, recovery, proven-vs-undetermined ledger |
 | [`tools/detect-liveness-check.py`](tools/detect-liveness-check.py) | Stdlib-only external liveness check (inference sanity band + event drought); cron it, wire the exit code to your alerting |
 | `LICENSE` | MIT |
 
@@ -270,7 +290,8 @@ liveness-check tool) freely; attribution appreciated.
 
 *Found and documented 2026-07-25 during live incident response on a
 production 13-camera deployment. Same environment as
-[frigate-dgx-spark](https://github.com/tempered-steel/frigate-dgx-spark).*
+[frigate-dgx-spark](https://github.com/tempered-steel/frigate-dgx-spark).
+Second incident documented 2026-07-28 under the same process.*
 
 *Disclosure: this dossier was compiled by an AI agent working under the
 operator's direction during the live incident response. Every log line,
