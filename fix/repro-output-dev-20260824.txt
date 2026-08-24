@@ -1,0 +1,24 @@
+=== upstream v0.17.2 (defect demonstration) ===
+S1 baseline healthy peer [upstream]
+  [PASS] upstream: ready after init
+  [PASS] upstream: real detections returned -- row0=[1.  0.9]
+S2 failed-init wedge, peer then healthy [upstream]
+  [PASS] upstream: init failed as scripted
+  [PASS] upstream: DEFECT REPRODUCED -- still wedged 3s after peer healthy
+S3 single spurious ready reply [upstream]
+  [PASS] upstream: DEFECT REPRODUCED -- armed by ONE unconfirmed reply
+S4 not-ready log volume over 50 rapid calls [upstream]
+  [PASS] upstream: DEFECT REPRODUCED -- 50 warnings for 50 calls
+=== patched (fix verification) ===
+S1 baseline healthy peer [patched]
+  [PASS] patched: ready after init
+  [PASS] patched: real detections returned -- row0=[1.  0.9]
+S2 failed-init wedge, peer then healthy [patched]
+  [PASS] patched: init failed as scripted
+  [PASS] patched: recovered without restart
+S3 single spurious ready reply [patched]
+  [PASS] patched: double-handshake refused to arm
+S4 not-ready log volume over 50 rapid calls [patched]
+  [PASS] patched: rate-limited to 1 warning(s)
+
+12 checks, 0 failed

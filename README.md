@@ -1,5 +1,10 @@
 # Frigate `zmq` detector: false "Model ready" after remote peer power loss → 15 h of silent zero-detections
 
+> **FIX AVAILABLE (2026-08-24):** a tested, unofficial fix for both failure
+> modes — drop-in patched plugin for v0.17.2 and dev, unified diffs, and a
+> 12-check repro/regression harness — is in [`fix/`](fix/). See
+> [`fix/README.md`](fix/README.md) for installation.
+
 An evidence dossier for an incident in which Frigate's in-tree ZMQ detector
 plugin (`frigate/detectors/plugins/zmq_ipc.py`) declared its model ready
 **87 seconds before the remote detector process existed**, then silently
