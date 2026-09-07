@@ -1,5 +1,5 @@
 --- upstream/zmq_ipc.py	2026-08-14 12:31:49.665927455 -0500
-+++ patched/zmq_ipc.py	2026-08-14 12:32:35.419263427 -0500
++++ patched/zmq_ipc.py	2026-08-31 09:36:18.043896907 -0500
 @@ -1,6 +1,7 @@
  import json
  import logging
@@ -8,16 +8,21 @@
  from typing import Any, List
  
  import numpy as np
-@@ -15,6 +16,8 @@
+@@ -15,6 +16,13 @@
  
  DETECTOR_KEY = "zmq"
  
 +NOT_READY_LOG_INTERVAL_S = 60.0
 +
++# Model-operation timeout used at STARTUP (__init__). Frigate's detector
++# watchdog (frigate/watchdog.py) only arms once a detect call has started,
++# so a long first handshake / model transfer here is safe.
++STARTUP_MODEL_OP_TIMEOUT_MS = 30000
++
  
  class ZmqDetectorConfig(BaseDetectorConfig):
      type: Literal[DETECTOR_KEY]
-@@ -25,6 +28,10 @@
+@@ -25,6 +33,19 @@
          default=200, title="ZMQ request timeout in milliseconds"
      )
      linger_ms: int = Field(default=0, title="ZMQ socket linger in milliseconds")
@@ -25,23 +30,42 @@
 +        default=5000,
 +        title="Minimum interval between model re-initialization attempts in milliseconds",
 +    )
++    recovery_timeout_ms: int = Field(
++        default=2000,
++        title=(
++            "Model-operation timeout for IN-CALL recovery in milliseconds. "
++            "Must keep a whole detect call well under Frigate's 10 s detector "
++            "watchdog; the watchdog SIGKILLs a 'stuck' detector process and that "
++            "can strand the shared detection queue lock (2026-08-31 capture)"
++        ),
++    )
  
  
  class ZmqIpcDetector(DetectionApi):
-@@ -52,6 +59,8 @@
+@@ -52,6 +73,16 @@
      - On initialization, sends model request to check if model is available
      - If model not available, sends model data via ZMQ
      - Only starts inference after model is ready
 +    - If initialization fails, it is retried with a backoff from the detect
 +      path rather than requiring a full restart to recover
++    - In-call recovery is TIME-BOUNDED (recovery_timeout_ms, default 2 s):
++      Frigate's watchdog restarts a detector whose detect call exceeds 10 s,
++      and it does so with SIGKILL after a 30 s grace. A process killed while
++      inside the detection queue's read lock leaves that lock held forever;
++      the replacement detector then blocks on it and never runs an inference
++      (observed 2026-08-31, py-spy: queues.py get -> _rlock.acquire, futex).
++      The 30 s model-operation timeout is therefore used only at startup,
++      where the watchdog is not yet armed.
      """
  
      type_key = DETECTOR_KEY
-@@ -63,12 +72,16 @@
+@@ -63,12 +94,18 @@
          self._endpoint = detector_config.endpoint
          self._request_timeout_ms = detector_config.request_timeout_ms
          self._linger_ms = detector_config.linger_ms
 +        self._reinit_backoff_ms = detector_config.reinit_backoff_ms
++        self._recovery_timeout_ms = detector_config.recovery_timeout_ms
++        self._model_op_timeout_ms = STARTUP_MODEL_OP_TIMEOUT_MS
          self._socket = None
          self._create_socket()
  
@@ -54,7 +78,7 @@
  
          # Initialize model if needed
          self._initialize_model()
-@@ -83,6 +96,14 @@
+@@ -83,6 +120,14 @@
              except Exception:
                  pass
          self._socket = self._context.socket(zmq.REQ)
@@ -69,14 +93,32 @@
          # Apply timeouts and linger so calls don't block indefinitely
          self._socket.setsockopt(zmq.RCVTIMEO, self._request_timeout_ms)
          self._socket.setsockopt(zmq.SNDTIMEO, self._request_timeout_ms)
-@@ -98,11 +119,20 @@
+@@ -96,13 +141,35 @@
+         model_path = self.detector_config.model.path
+         return os.path.basename(model_path)
  
-     def _initialize_model(self) -> None:
-         """Initialize the model by checking availability and transferring if needed."""
+-    def _initialize_model(self) -> None:
+-        """Initialize the model by checking availability and transferring if needed."""
++    def _initialize_model(self, in_call: bool = False) -> None:
++        """Initialize the model by checking availability and transferring if needed.
++
++        in_call=True selects the short model-operation timeout so the whole
++        attempt stays inside the watchdog budget (see class docstring).
++        """
 +        self._last_init_attempt = time.monotonic()
 +        self._model_ready = False
++        self._model_op_timeout_ms = (
++            self._recovery_timeout_ms if in_call else STARTUP_MODEL_OP_TIMEOUT_MS
++        )
          try:
-             logger.info(f"Initializing model: {self._model_name}")
+-            logger.info(f"Initializing model: {self._model_name}")
++            if in_call:
++                logger.info(
++                    f"Initializing model: {self._model_name} "
++                    f"(in-call recovery, budget {self._model_op_timeout_ms} ms)"
++                )
++            else:
++                logger.info(f"Initializing model: {self._model_name}")
  
 -            # Check if model is available and transfer if needed
 -            if self._check_and_transfer_model():
@@ -92,7 +134,7 @@
                  logger.info(f"Model {self._model_name} is ready")
                  self._model_ready = True
              else:
-@@ -111,6 +141,38 @@
+@@ -111,6 +178,38 @@
          except Exception as e:
              logger.error(f"Failed to initialize model: {e}")
  
@@ -109,7 +151,7 @@
 +            >= self._reinit_backoff_ms / 1000.0
 +        ):
 +            try:
-+                self._initialize_model()
++                self._initialize_model(in_call=True)
 +            except Exception:
 +                pass
 +
@@ -131,7 +173,34 @@
      def _check_and_transfer_model(self) -> bool:
          """Check if model is available and transfer if needed in one atomic operation."""
          try:
-@@ -286,8 +348,10 @@
+@@ -120,9 +219,10 @@
+ 
+             self._socket.send_multipart([header_bytes])
+ 
+-            # Temporarily increase timeout for model operations
++            # Temporarily raise the timeout for model operations (startup:
++            # 30 s; in-call recovery: recovery_timeout_ms)
+             original_timeout = self._socket.getsockopt(zmq.RCVTIMEO)
+-            self._socket.setsockopt(zmq.RCVTIMEO, 30000)
++            self._socket.setsockopt(zmq.RCVTIMEO, self._model_op_timeout_ms)
+ 
+             try:
+                 response_frames = self._socket.recv_multipart()
+@@ -213,9 +313,11 @@
+ 
+             self._socket.send_multipart([header_bytes, model_data])
+ 
+-            # Temporarily increase timeout for model loading (can take several seconds)
++            # Temporarily raise the timeout for model loading (startup: 30 s;
++            # in-call recovery: recovery_timeout_ms -- a load that outlives the
++            # budget is picked up by the next backoff-gated check instead)
+             original_timeout = self._socket.getsockopt(zmq.RCVTIMEO)
+-            self._socket.setsockopt(zmq.RCVTIMEO, 30000)
++            self._socket.setsockopt(zmq.RCVTIMEO, self._model_op_timeout_ms)
+ 
+             try:
+                 # Receive response
+@@ -286,8 +388,10 @@
  
      def detect_raw(self, tensor_input: np.ndarray) -> np.ndarray:
          if not self._model_ready:
@@ -144,7 +213,7 @@
  
          try:
              header_bytes = self._build_header(tensor_input)
-@@ -303,21 +367,16 @@
+@@ -303,21 +407,16 @@
              # Ensure output shape and dtype are exactly as expected
              return detections
          except zmq.Again:

@@ -1,0 +1,32 @@
+=== upstream v0.17.2 (defect demonstration) ===
+S1 baseline healthy peer [upstream]
+  [PASS] upstream: ready after init
+  [PASS] upstream: real detections returned -- row0=[1.  0.9]
+S2 failed-init wedge, peer then healthy [upstream]
+  [PASS] upstream: init failed as scripted
+  [PASS] upstream: DEFECT REPRODUCED -- still wedged 3s after peer healthy
+S3 single spurious ready reply [upstream]
+  [PASS] upstream: DEFECT REPRODUCED -- armed by ONE unconfirmed reply
+S4 not-ready log volume over 50 rapid calls [upstream]
+  [PASS] upstream: DEFECT REPRODUCED -- 50 warnings for 50 calls
+S5 half-open peer mid-run: one detect_raw wall time vs 10 s watchdog [upstream]
+  [PASS] upstream: ready before the outage
+  [PASS] upstream: DEFECT REPRODUCED -- detect_raw blocked 30.2s (> 10 s watchdog)
+=== patched (fix verification) ===
+S1 baseline healthy peer [patched]
+  [PASS] patched: ready after init
+  [PASS] patched: real detections returned -- row0=[1.  0.9]
+S2 failed-init wedge, peer then healthy [patched]
+  [PASS] patched: init failed as scripted
+  [PASS] patched: recovered without restart
+S3 single spurious ready reply [patched]
+  [PASS] patched: double-handshake refused to arm
+S4 not-ready log volume over 50 rapid calls [patched]
+  [PASS] patched: rate-limited to 1 warning(s)
+S5 half-open peer mid-run: one detect_raw wall time vs 10 s watchdog [patched]
+  [PASS] patched: ready before the outage
+  [PASS] patched: detect_raw bounded to 2.20s (< 10 s watchdog; budget 2.0 s + 0.2 s request)
+  [PASS] patched: next call inside backoff returned in 0 ms
+  [PASS] patched: recovered by itself 1.0s after the peer returned (dropped 2 requests during the outage)
+
+18 checks, 0 failed

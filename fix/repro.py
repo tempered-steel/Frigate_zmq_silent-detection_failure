@@ -23,6 +23,15 @@ Scenarios (mapped to the filed evidence, discussion #23883):
   S4  log flood       not-ready path called rapidly. Upstream: one warning
                       per call (the spam that destroyed ~200x of log history
                       in incident 1). Patched: 1 line + suppressed counter.
+  S5  watchdog budget healthy peer goes SILENT mid-run (TCP up, no replies
+                      -- the 2026-08-30/31 UDM-restart class). One detect_raw
+                      call then runs the inline re-init. Upstream: blocks for
+                      the 30 s model-operation timeout, far past Frigate's
+                      10 s detector watchdog (which SIGKILLs the process and
+                      strands the detection-queue lock -- captured 2026-08-31).
+                      Patched v1.3: bounded by recovery_timeout_ms, then the
+                      backoff makes later calls instant, and the plugin
+                      recovers by itself when the peer answers again.
 
 Usage: run with a python that has pyzmq + numpy + pydantic:
   <venv>/bin/python repro.py
@@ -106,7 +115,7 @@ class _Model:
 #   healthy       answer everything correctly (marker detections)
 #   refuse        model_request -> available False; model_data -> saved False
 #   one_then_dead answer the first model_request ready-True, then stop
-# Mode is switchable live via set_mode().
+# Mode is switchable live via set_mode(). S5 uses BlackholePeer below.
 # --------------------------------------------------------------------------
 import numpy as np
 
@@ -181,6 +190,49 @@ class Peer(threading.Thread):
         return None
 
 
+class BlackholePeer(Peer):
+    """Half-open peer for S5: a ROUTER socket (no REQ/REP lockstep) that stays
+    bound and connected the whole time. Mode "healthy" answers like Peer;
+    mode "blackhole" CONSUMES every request and never answers -- TCP is up,
+    the request is gone, the client only ever sees its own timeout. This is
+    the shape of a peer behind a rebooting router as seen from the client,
+    and it cannot die of the REP state machine the way Peer would.
+    The envelope (identity .. empty delimiter, incl. the REQ_CORRELATE id
+    frame when present) is echoed back verbatim, exactly as a REP does."""
+
+    def __init__(self, endpoint):
+        super().__init__(endpoint)
+        self.dropped = 0
+
+    def run(self):
+        ctx = zmq.Context()
+        sock = ctx.socket(zmq.ROUTER)
+        sock.setsockopt(zmq.RCVTIMEO, 100)
+        sock.bind(self.endpoint)
+        while not self._stop.is_set():
+            try:
+                frames = sock.recv_multipart()
+            except zmq.Again:
+                continue
+            if self.mode == "blackhole":
+                self.dropped += 1
+                continue
+            try:
+                cut = frames.index(b"") + 1
+            except ValueError:
+                self.dropped += 1
+                continue
+            envelope, body = frames[:cut], frames[cut:]
+            self.answered += 1
+            reply = self._reply_for(body)
+            if reply is None:
+                self.dropped += 1
+                continue
+            sock.send_multipart(envelope + reply)
+        sock.close(linger=0)
+        ctx.term()
+
+
 def make_detector(mod, endpoint, extra_cfg=None):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".model") as f:
         f.write(b"\x00" * 1024)
@@ -210,11 +262,11 @@ def check(name, cond, detail=""):
 PORT = 47311
 
 
-def fresh_peer(mode):
+def fresh_peer(mode, cls=Peer):
     global PORT
     PORT += 1
     ep = f"tcp://127.0.0.1:{PORT}"
-    p = Peer(ep)
+    p = cls(ep)
     p.mode = mode
     p.start()
     time.sleep(0.05)
@@ -298,6 +350,46 @@ def s4_log_flood(mod, label, expect_flood):
     peer.stop()
 
 
+def s5_watchdog_budget(mod, label, expect_bounded):
+    print(f"S5 half-open peer mid-run: one detect_raw wall time vs 10 s watchdog [{label}]")
+    # Test knobs: backoff 3000 ms (> the 2.2 s attempt, as production's 5000 ms
+    # is) so a call right after an attempt is provably inside the backoff; the
+    # outage begins OUTSIDE the post-init window after a 3.1 s settle.
+    # Production: 5000 ms backoff, 2000 ms budget -> one 2.2 s attempt per 5 s
+    # while a peer is unreachable, every other call instant zeros.
+    peer, ep = fresh_peer("healthy", cls=BlackholePeer)
+    det = make_detector(mod, ep, extra_cfg=(
+        {"reinit_backoff_ms": 3000, "recovery_timeout_ms": 2000} if expect_bounded else None))
+    check(f"{label}: ready before the outage", det._model_ready)
+    time.sleep(3.1)
+    peer.set_mode("blackhole")
+    t0 = time.monotonic()
+    det.detect_raw(FRAME)          # request times out -> inline re-init runs
+    dt = time.monotonic() - t0
+    if expect_bounded:
+        check(f"{label}: detect_raw bounded to {dt:.2f}s (< 10 s watchdog; budget 2.0 s + 0.2 s request)",
+              2.0 <= dt < 5.0)
+        t1 = time.monotonic()
+        det.detect_raw(FRAME)      # inside the backoff: no attempt, instant zeros
+        dt2 = time.monotonic() - t1
+        check(f"{label}: next call inside backoff returned in {dt2*1000:.0f} ms", dt2 < 0.1)
+        peer.set_mode("healthy")   # peer answers again
+        deadline = time.monotonic() + 8.0
+        recovered = False
+        t2 = time.monotonic()
+        while time.monotonic() < deadline:
+            out = det.detect_raw(FRAME)
+            if float(out[0][1]) == np.float32(0.9):
+                recovered = True
+                break
+            time.sleep(0.05)
+        check(f"{label}: recovered by itself {time.monotonic()-t2:.1f}s after the peer returned (dropped {peer.dropped} requests during the outage)",
+              recovered)
+    else:
+        check(f"{label}: DEFECT REPRODUCED -- detect_raw blocked {dt:.1f}s (> 10 s watchdog)", dt > 10.0)
+    peer.stop()
+
+
 def main():
     logging.basicConfig(level=logging.CRITICAL)  # silence plugin noise; S4 traps directly
     _install_stubs()
@@ -309,12 +401,14 @@ def main():
     s2_wedge_recovery(orig, "upstream", expect_recovery=False)
     s3_false_ready(orig, "upstream", expect_armed=True)
     s4_log_flood(orig, "upstream", expect_flood=True)
+    s5_watchdog_budget(orig, "upstream", expect_bounded=False)
 
     print("=== patched (fix verification) ===")
     s1_baseline(patched, "patched")
     s2_wedge_recovery(patched, "patched", expect_recovery=True)
     s3_false_ready(patched, "patched", expect_armed=False)
     s4_log_flood(patched, "patched", expect_flood=False)
+    s5_watchdog_budget(patched, "patched", expect_bounded=True)
 
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results)} checks, {len(failed)} failed")
